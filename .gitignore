@@ -1,0 +1,193 @@
+# =============================================================================
+# SiliconPilot AI — .gitignore
+# Comprehensive for Python ML / EDA / Streamlit Project
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Python bytecode & caches
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# ---------------------------------------------------------------------------
+# Virtual environments
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.env/
+.conda/
+Pipfile.lock
+poetry.lock
+
+# ---------------------------------------------------------------------------
+# Distribution / packaging
+# ---------------------------------------------------------------------------
+build/
+dist/
+*.egg-info/
+*.egg
+MANIFEST
+.eggs/
+site-packages/
+
+# ---------------------------------------------------------------------------
+# Testing & coverage
+# ---------------------------------------------------------------------------
+.pytest_cache/
+.stage4_tmp/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.coverage
+.coverage.*
+htmlcov/
+junit*.xml
+test-results/
+
+# ---------------------------------------------------------------------------
+# Type checking
+# ---------------------------------------------------------------------------
+.mypy_cache/
+.pytype/
+.pyre/
+.dmypy.json
+dmypy.json
+
+# ---------------------------------------------------------------------------
+# Jupyter / IPython
+# ---------------------------------------------------------------------------
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+# ---------------------------------------------------------------------------
+# ML artefacts & large data files
+# ---------------------------------------------------------------------------
+# Models - exclude heavy binaries, preserve manifest metadata
+models/saved_models/*
+!models/saved_models/models_manifest.json
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.hdf5
+*.pkl
+*.joblib
+*.onnx
+*.pb
+*.tflite
+
+# Data - exclude raw benchmark caches & runtime simulation database
+data/raw/
+data/processed/
+data/iclr_adapt/
+data/osiris/
+data/simulation_results.db
+*.csv
+*.tsv
+*.parquet
+*.feather
+*.arrow
+*.npy
+*.npz
+*.mat
+*.bin
+*.db
+*.sqlite
+*.sqlite3
+
+# Explicitly keep lightweight demonstration / test samples
+!data/sample/
+!data/sample/**
+!data/samples/
+!data/samples/**
+
+# ---------------------------------------------------------------------------
+# Logs & transient run artifacts
+# ---------------------------------------------------------------------------
+logs/
+*.log
+reports/*.pdf
+reports/*.html
+reports/*.png
+reports/*.svg
+temp_*.cir
+*.cir.out
+*.raw
+
+# ---------------------------------------------------------------------------
+# Environment & secrets (CRITICAL SECURITY)
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.env
+secrets.yaml
+secrets.json
+.streamlit/secrets.toml
+credentials.json
+*.pem
+*.key
+*.crt
+*.p12
+
+# ---------------------------------------------------------------------------
+# IDE / editor
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------------------
+# OS artefacts
+# ---------------------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+
+# ---------------------------------------------------------------------------
+# Local Backups & Experimental Scratch (Do not publish to Git)
+# ---------------------------------------------------------------------------
+backups/
+.source_backups/
+scratch/
+*.bak
+*.tmp
+*.temp
+
+# ---------------------------------------------------------------------------
+# DVC / Tracking
+# ---------------------------------------------------------------------------
+/tmp
+.dvc/cache
+.dvc/tmp
+mlruns/
+wandb/
+.neptune/
+lightning_logs/
+
+# ---------------------------------------------------------------------------
+# Node assets
+# ---------------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
