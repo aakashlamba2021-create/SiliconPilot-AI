@@ -10,7 +10,14 @@
 
 | Subsystem | Feature / Capability | Implementation Status | Validation Confidence |
 | :--- | :--- | :--- | :--- |
-| **Dashboard** | 8 Native Streamlit Pages | ✅ Operational | High (Browser & import smoke-tested) |
+| **Assistant** | Unified Gemini Conversational Assistant | ✅ Operational | High (ChatGPT-style bubbles, staged attachments, retry) |
+| **Assistant** | Multimodal Layout Review (PNG/JPG/JPEG/WEBP) | ✅ Operational | High (In-composer staging, inline base64, WEBP support) |
+| **Assistant** | Analog IC Review Schema (6-Section System) | ✅ Operational | High (Enforced via system instruction & prompt) |
+| **Assistant** | Dynamic Failover & Demand Spike Protection | ✅ Operational | High (Automated fallback to gemini-3-flash-preview) |
+| **Diagnostics** | System Health & Diagnostics (8 Sections, 7 Tabs) | ✅ Operational | High (Passive hardware/OS/runtime telemetry) |
+| **Diagnostics** | Active Gemini API Probe Button | ✅ Operational | High (Live latency, model status, and error guidance) |
+| **Diagnostics** | Active ngspice Simulation Smoke Test Button | ✅ Operational | High (Real RC testbench via C-API with 8.3 scratch path) |
+| **Dashboard** | 8 Native Streamlit Pages (Assistant Landing Page) | ✅ Operational | High (Browser & import smoke-tested) |
 | **Simulation** | ngspice Shared Library C-API Runner | ✅ Operational | High (100% test coverage; worker isolated) |
 | **Simulation** | AC Open-Loop Frequency Analysis | ✅ Operational | High (Gain, GBW, PM verified against SPICE) |
 | **Simulation** | Transient Step / Slew Rate Analysis | ✅ Operational | High (Slew rate and settling time extracted) |
@@ -18,9 +25,6 @@
 | **Optimization**| Multiobjective Pareto Candidate Ranking | ✅ Operational | High (Filtered against quarantined models) |
 | **Models** | Model Registry & Manifest Tracking | ✅ Operational | High (Joblib serialization, versioning) |
 | **Models** | Declarative Trust Policy (`model_policy.py`) | ✅ Operational | High (Fail-closed schema enforcer) |
-| **Assistant** | Local Deterministic Knowledge Base | ✅ Operational | High (Offline, zero-credential requirement) |
-| **Assistant** | Multimodal Vision Integration (Gemini/OpenAI) | ✅ Operational | High (Dual-provider contract tested with mocks) |
-| **Assistant** | Multi-Image Upload & Inspection Tray | ✅ Operational | High (Session state isolated; removal chips) |
 | **EDA Ingest** | GDSII / OASIS Header & Cell Extraction | ✅ Operational | High (Read-only via `gdstk`) |
 | **EDA Ingest** | LEF / DEF Component & Pin Counts | ✅ Operational | High (Read-only text parsing) |
 | **EDA Ingest** | SPICE Netlist Static Analysis | ✅ Operational | High (Parsed without execution) |
@@ -38,24 +42,25 @@ rootdir: C:\Users\aakas\OneDrive\Desktop\samsung project\SiliconPilot-AI
 configfile: pytest.ini
 testpaths: tests
 plugins: anyio-4.16.0
-collected 107 items
+collected 115 items
 
 =========================== short test summary info ===========================
 SKIPPED [1] tests\test_stage4_minimal_ngspice.py:50: Set NGSPICE_DLL for topology simulations.
 SKIPPED [1] tests\test_stage4_minimal_ngspice.py:17: Set NGSPICE_DLL for the environment-specific live simulation test.
-================== 105 passed, 2 skipped, 3 subtests passed in 9.51s ===================
+================== 113 passed, 2 skipped, 3 subtests passed in 20.88s ===================
 ```
 
 ### Test Suite Distribution:
 1. `tests/test_conversational_assistant.py`: Assistant dialogue heuristics and multi-turn context.
-2. `tests/test_dashboard_trust_labels.py`: UI provenance labels and quarantine enforcement.
-3. `tests/test_eda_inspection.py`: GDSII, OASIS, LEF, DEF, and DRC report parsers.
-4. `tests/test_model_policy.py`: Model trust schema validation and fail-closed policy checks.
-5. `tests/test_multimodal_assistant.py`: Vision provider contracts, multi-image upload schemas, and consent boundaries.
-6. `tests/test_phase4_1_batch1.py`: ngspice worker process isolation, ABI callbacks, and robustness checks.
-7. `tests/test_phase4_simulation.py`: End-to-end netlist generation, AC/transient simulation, and SQLite logging.
-8. `tests/test_pipeline.py`: End-to-end data loader, preprocessing, and optimizer pipeline.
-9. `tests/test_vision_providers.py`: Gemini and OpenAI provider request/response normalization.
+2. `tests/test_unified_gemini_diagnostics.py`: Unified Gemini conversational turns, connection probe telemetry, 503 fallback, string-compatible ChatTurnResult, WEBP normalization, and hardware diagnostics.
+3. `tests/test_dashboard_trust_labels.py`: UI provenance labels and quarantine enforcement.
+4. `tests/test_eda_inspection.py`: GDSII, OASIS, LEF, DEF, and DRC report parsers.
+5. `tests/test_model_policy.py`: Model trust schema validation and fail-closed policy checks.
+6. `tests/test_multimodal_assistant.py`: Vision provider contracts, multi-image upload schemas, and consent boundaries.
+7. `tests/test_phase4_1_batch1.py`: ngspice worker process isolation, ABI callbacks, and robustness checks.
+8. `tests/test_phase4_simulation.py`: End-to-end netlist generation, AC/transient simulation, and SQLite logging.
+9. `tests/test_pipeline.py`: End-to-end data loader, preprocessing, and optimizer pipeline.
+10. `tests/test_vision_providers.py`: Gemini and OpenAI provider request/response normalization.
 
 ---
 

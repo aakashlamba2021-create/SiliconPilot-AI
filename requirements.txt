@@ -21,4 +21,6 @@ seaborn>=0.13.0
 # Network & Utilities
 requests>=2.32.0
 click>=8.1.0
+psutil>=6.0.0
+pillow>=10.0.0
 

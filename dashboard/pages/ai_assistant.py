@@ -1,55 +1,60 @@
-"""Page 6: session-scoped analog IC engineering assistant."""
+"""
+AI Engineering Assistant Page — SiliconPilot AI
+Unified Conversational Assistant with Google Gemini Multimodal Engine,
+persistent chat history, in-composer image attachments, and read-only EDA artifact inspection.
+"""
 from __future__ import annotations
 
-from io import BytesIO
+import base64
 from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
+from io import BytesIO
 import json
+import os
+from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Mapping, Sequence
 
+from PIL import Image
 import streamlit as st
 
 from dashboard.chat import SiliconPilotChatbot
 from dashboard.components.header import render_header
 from src.assistant.vision import (
+    DEFAULT_MAX_IMAGES,
     ImageInput,
     ImageValidationError,
     VisionAnalysisError,
     VisionAnalysisService,
-    clear_all_image_data,
+    VisionProviderConfig,
+    VisualAnalysis,
     clear_image_selection,
     remove_image_from_selection,
     resolve_configured_provider_configs,
     resolve_provider_config,
     validate_uploaded_image,
 )
+from src.eda.inspection import (
+    ArtifactInspectionError,
+    inspect_artifact,
+)
 
 MAX_UPLOAD_MB = 10
-PROVIDER_LABELS = {
-    "gemini": "Google Gemini API",
-    "openai": "OpenAI API",
-    "openai_compatible": "OpenAI-compatible endpoint",
-}
-COMPARISON_REQUEST = re.compile(
-    r"\b(compare|comparison|versus|vs\.?|before\s*(and|/)\s*after|original\s+(and|versus)\s+modified)\b",
-    re.IGNORECASE,
-)
-VISUAL_ANALYSIS_INTENT = re.compile(
-    r"\b(analy[sz]e|inspect|review|look\s+at|what\s+do\s+you\s+see|visual\s+comparison|compare\s+(?:these|the|both)\s+(?:images|layouts|screenshots))\b",
-    re.IGNORECASE,
-)
-QUICK_PROMPTS = {
-    "How to layout a Differential Pair?": "How do I layout a differential pair?",
-    "Explain DRC vs LVS verification": "Explain DRC vs LVS",
-    "How to reduce Parasitic Capacitance?": "How to reduce parasitic capacitance?",
-    "Show Trained Model Registry": "What models are currently trained?",
-}
+COMPARISON_REQUEST = re.compile(r"\b(compare|comparison|difference|differences|versus|vs\.?)\b", re.IGNORECASE)
 
+
+# ---------------------------------------------------------------------------
+# Backward-Compatible Helper Functions (Preserved for Unit Test Contracts)
+# ---------------------------------------------------------------------------
 
 def is_comparison_request(query: str) -> bool:
-    return bool(COMPARISON_REQUEST.search(query))
+    return bool(COMPARISON_REQUEST.search(query or ""))
+
+
+def artifact_report_key(filename: str, data: bytes, artifact_kind: str) -> str:
+    digest = hashlib.sha256(data).hexdigest()
+    return f"{artifact_kind}:{filename}:{digest}"
 
 
 def image_request_consent_key(
@@ -62,15 +67,10 @@ def image_request_consent_key(
     compare_mode: bool,
     nonce: int,
 ) -> str:
-    """Bind one-time consent to the exact outgoing content and next request nonce."""
     payload = json.dumps({
-        "provider": provider,
-        "model": model,
-        "question": question,
-        "image_ids": image_ids,
-        "image_labels": image_labels,
-        "engineering_context": engineering_context,
-        "compare_mode": compare_mode,
+        "provider": provider, "model": model, "question": question,
+        "image_ids": image_ids, "image_labels": image_labels,
+        "engineering_context": engineering_context, "compare_mode": compare_mode,
         "nonce": nonce,
     }, sort_keys=True, ensure_ascii=False)
     return f"assistant_consent_{provider}_{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
@@ -82,23 +82,13 @@ def image_request_is_authorized(
     provider_ids: list[str],
     consented_provider_ids: set[str],
 ) -> bool:
-    """Require a dedicated submit action, images, and consent for every target."""
     return bool(
-        explicit_submit
-        and image_ids
-        and provider_ids
+        explicit_submit and image_ids and provider_ids
         and set(provider_ids).issubset(consented_provider_ids)
     )
 
 
-def artifact_report_key(filename: str, data: bytes, artifact_kind: str) -> str:
-    """Fingerprint the exact file and parser selection that produced a report."""
-    digest = hashlib.sha256(data).hexdigest()
-    return f"{artifact_kind}:{filename}:{digest}"
-
-
 def provider_findings_context(provider_results: dict[str, dict[str, Any]]) -> str:
-    """Store concise prior vision findings so later image questions have useful context."""
     sections = ["Unverified AI visual findings from the prior image request:"]
     for provider_id, result in provider_results.items():
         analysis = result.get("analysis")
@@ -121,11 +111,7 @@ def provider_findings_context(provider_results: dict[str, dict[str, Any]]) -> st
 
 
 def compare_provider_findings(results: dict[str, dict[str, Any]]) -> dict[str, list[str]]:
-    """Compare exact wording overlap only; this is not a correctness or consensus score."""
-    completed = {
-        name: item["analysis"] for name, item in results.items()
-        if item.get("analysis") is not None
-    }
+    completed = {name: item["analysis"] for name, item in results.items() if item.get("analysis") is not None}
     if len(completed) < 2:
         return {"agreements": [], "provider_specific": []}
     observation_sets = {
@@ -151,7 +137,6 @@ def build_analysis_report(
     *,
     comparison: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
-    """Build an exportable report without embedding image bytes or credentials."""
     return {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "question": question,
@@ -162,9 +147,7 @@ def build_analysis_report(
         ],
         "provider_results": {
             provider: {
-                "model": item.get("model"),
-                "status": item.get("status"),
-                "error": item.get("error"),
+                "model": item.get("model"), "status": item.get("status"), "error": item.get("error"),
                 "analysis": asdict(item["analysis"]) if item.get("analysis") is not None else None,
             }
             for provider, item in provider_results.items()
@@ -181,7 +164,7 @@ def analysis_report_markdown(report: dict[str, Any]) -> str:
     lines = ["# SiliconPilot AI image analysis", "", f"- Created (UTC): `{report['created_at_utc']}`", f"- Question: {report['question']}", "", "## Images"]
     lines.extend(f"- `{item['label'] or item['filename']}` — `{item['filename']}` ({item['width']} × {item['height']} px)" for item in report["images"])
     for provider, item in report["provider_results"].items():
-        lines.extend(["", f"## {provider}: {item.get('model') or 'model unavailable'}", f"Status: {item.get('status', 'unknown')}" ])
+        lines.extend(["", f"## {provider}: {item.get('model') or 'model unavailable'}", f"Status: {item.get('status', 'unknown')}"])
         if item.get("error"):
             lines.append(f"Error: {item['error']}")
         analysis = item.get("analysis")
@@ -202,113 +185,16 @@ def analysis_report_markdown(report: dict[str, Any]) -> str:
         lines.extend(["", "## Provider comparison", "Exact text overlap is descriptive only; it is not a correctness score or a provider winner."])
         lines.extend(f"- Agreement: {value}" for value in report["provider_comparison"].get("agreements", []))
         lines.extend(f"- Provider-specific: {value}" for value in report["provider_comparison"].get("provider_specific", []))
-    lines.extend(["", "## Limitations", *(f"- {value}" for value in report["limitations"])])
+    if report.get("limitations"):
+        lines.extend(["", "## Limitations", *(f"- {value}" for value in report["limitations"])])
     return "\n".join(lines)
 
 
-def run_vision_analysis_for_providers(
-    configs: dict[str, Any],
-    provider_ids: list[str],
-    images: list[ImageInput],
-    question: str,
-    *,
-    consented_provider_ids: set[str],
-    conversation_context: list[dict[str, str]],
-    comparison_requested: bool,
-    engineering_context: dict[str, str],
-    service_factory=None,
-) -> dict[str, dict[str, Any]]:
-    """Run explicitly selected providers with identical inputs and provider-scoped consent."""
-    factory = service_factory or VisionAnalysisService
-    results: dict[str, dict[str, Any]] = {}
-    for provider_id in provider_ids:
-        config = configs.get(provider_id)
-        if provider_id not in consented_provider_ids:
-            results[provider_id] = {
-                "model": getattr(config, "model", None), "status": "not_sent",
-                "analysis": None, "error": "No request sent because provider-specific consent was not granted.",
-            }
-            continue
-        if config is None:
-            results[provider_id] = {
-                "model": None, "status": "unavailable", "analysis": None,
-                "error": "No request sent because this provider is not configured.",
-            }
-            continue
-        provider_service = factory(config)
-        try:
-            analysis = provider_service.analyze(
-                images, question, conversation_context=conversation_context,
-                comparison_requested=comparison_requested,
-                engineering_context=engineering_context,
-            )
-            results[provider_id] = {
-                "model": provider_service.model_name, "status": "completed",
-                "analysis": analysis, "error": None,
-            }
-        except VisionAnalysisError as exc:
-            results[provider_id] = {
-                "model": provider_service.model_name, "status": "failed",
-                "analysis": None, "error": str(exc),
-            }
-        except Exception:
-            results[provider_id] = {
-                "model": provider_service.model_name, "status": "failed",
-                "analysis": None, "error": "Provider failed unexpectedly. No analysis result was produced.",
-            }
-    return results
-
-
-def _vision_secrets() -> dict[str, Any]:
-    """Read optional Streamlit secrets without surfacing secret values."""
-    try:
-        section = st.secrets.get("vision_assistant", {})
-        return {"vision_assistant": dict(section)} if hasattr(section, "items") else {}
-    except Exception:
-        return {}
-
-
-def _initialise_state() -> None:
-    st.session_state.setdefault(
-        "chat_history",
-        [{
-            "role": "assistant",
-            "content": "Hello! Ask an analog-layout question, or upload a layout screenshot and ask what you would like me to inspect.",
-            "image_ids": [],
-        }],
-    )
-    st.session_state.setdefault("assistant_image_assets", {})
-    st.session_state.setdefault("assistant_selected_image_ids", [])
-    st.session_state.setdefault("assistant_image_labels", {})
-    st.session_state.setdefault("assistant_upload_widget_version", 0)
-    st.session_state.setdefault("assistant_image_question_version", 0)
-    st.session_state.setdefault("assistant_request_nonce", 0)
-    st.session_state.setdefault("assistant_selected_provider", None)
-    st.session_state.setdefault("assistant_last_report", None)
-    st.session_state.setdefault("assistant_artifact_report_key", None)
-
-
-def _asset_record(image: ImageInput) -> dict[str, Any]:
-    return {
-        "image_id": image.image_id,
-        "filename": image.filename,
-        "mime_type": image.mime_type,
-        "data": image.data,
-        "width": image.width,
-        "height": image.height,
-    }
-
-
-def _image_from_record(record: dict[str, Any], label: str = "") -> ImageInput:
-    return ImageInput(
-        image_id=record["image_id"],
-        filename=record["filename"],
-        mime_type=record["mime_type"],
-        data=record["data"],
-        width=record["width"],
-        height=record["height"],
-        label=label,
-    )
+PROVIDER_LABELS = {
+    "gemini": "Google Gemini",
+    "openai": "OpenAI",
+    "openai_compatible": "OpenAI-compatible endpoint",
+}
 
 
 def _privacy_text(provider: str) -> str:
@@ -356,209 +242,18 @@ def _provider_controls(secrets: dict[str, Any]) -> tuple[VisionAnalysisService |
             "Vision provider",
             options,
             index=index,
-            format_func=lambda value: "Choose a configured provider" if value is None else f"{PROVIDER_LABELS[value]} · {configs[value].model}",
+            format_func=lambda value: "Choose a configured provider" if value is None else f"{PROVIDER_LABELS.get(value, value)} · {configs[value].model}",
             key="assistant_provider_choice_widget",
             help="Switching providers preserves chat and uploaded images. A failed request never switches providers automatically.",
         )
     st.session_state.assistant_selected_provider = selected_provider
 
     if selected_provider is None:
-        if preferred and preferred not in configs:
-            st.warning(
-                f"The selected environment provider `{preferred}` is not configured with its required API key. "
-                "Choose another configured provider explicitly, or provide the missing key."
-            )
-        elif len(configs) > 1:
-            st.info("Choose which configured provider receives image submissions.")
-        else:
-            st.warning(
-                "Live image analysis is unavailable. Configure `GEMINI_API_KEY` or `OPENAI_API_KEY`, "
-                "select a model, then restart Streamlit. Upload previews and text-only chat remain available."
-            )
         return None, None
 
     config = configs[selected_provider]
     service = VisionAnalysisService(config)
-    st.caption(
-        f"Active provider: **{service.provider_name}** · model `{service.model_name}`. "
-        "Configuration is present; API access is not verified until a request succeeds."
-    )
-    st.info(_privacy_text(selected_provider))
-    st.caption(
-        f"Per request: up to {config.max_images} images; maximum encoded JSON payload "
-        f"{config.max_payload_bytes / (1024 * 1024):.0f} MB; maximum response {config.max_output_tokens} tokens. "
-        "API account tier and billing rate are not assumed."
-    )
-    st.caption("Consent is requested for each specific image question below and resets after submission.")
     return service, selected_provider
-
-
-def _render_history() -> None:
-    assets = st.session_state.assistant_image_assets
-    for message in st.session_state.chat_history:
-        role = message.get("role", "assistant")
-        with st.chat_message(role):
-            provider_results = message.get("provider_results")
-            if provider_results:
-                st.markdown(message.get("content", "Independent provider outputs for the same request:"))
-                columns = st.columns(min(2, len(provider_results)))
-                for index, (provider, result) in enumerate(provider_results.items()):
-                    with columns[index % len(columns)]:
-                        st.markdown(f"#### {provider} · {result.get('model', 'model unavailable')}")
-                        if result.get("error"):
-                            st.error(result["error"])
-                        elif result.get("analysis"):
-                            st.markdown(result["analysis"].to_markdown(provider, comparison_requested=bool(message.get("comparison_requested"))))
-            else:
-                st.markdown(message.get("content", ""))
-            labels = message.get("image_labels", {})
-            for image_id in message.get("image_ids", []):
-                image = assets.get(image_id)
-                if image:
-                    label = labels.get(image_id)
-                    caption = f"{label + ' · ' if label else ''}{image['filename']} · {image['width']} × {image['height']} px"
-                    st.image(
-                        BytesIO(image["data"]), caption=caption, width=260,
-                        alt=f"Layout screenshot {image['filename']}",
-                    )
-                else:
-                    st.caption("A referenced image is no longer available in this session.")
-
-
-def _render_selected_images(max_images: int) -> None:
-    selected = st.session_state.assistant_selected_image_ids
-    assets = st.session_state.assistant_image_assets
-    selected[:] = [image_id for image_id in selected if image_id in assets]
-    if not selected:
-        return
-    st.markdown(f"**Selected images ({len(selected)} of {max_images} max per request)**")
-    st.caption("For a comparison, set clear labels such as `Original`, `Modified`, or `Strategy A`.")
-    columns = st.columns(min(3, len(selected)))
-    for index, image_id in enumerate(list(selected)):
-        image = assets[image_id]
-        default_label = "Original" if index == 0 else "Modified" if index == 1 else f"Alternative {index + 1}"
-        with columns[index % len(columns)]:
-            st.image(
-                BytesIO(image["data"]),
-                caption=f"{image['filename']} · {image['width']} × {image['height']} px",
-                width="stretch", alt=f"Selected layout screenshot {image['filename']}",
-            )
-            label = st.text_input(
-                "Provider label",
-                value=st.session_state.assistant_image_labels.get(image_id, default_label),
-                key=f"assistant_image_label_{image_id}",
-                help="This label is sent with the image so a comparison can refer to it by name.",
-            )
-            st.session_state.assistant_image_labels[image_id] = label.strip() or default_label
-            if st.button("Remove from selection", key=f"assistant_remove_{image_id}"):
-                updated, referenced = remove_image_from_selection(image_id, selected, st.session_state.chat_history)
-                st.session_state.assistant_selected_image_ids = updated
-                if not referenced:
-                    assets.pop(image_id, None)
-                    st.session_state.assistant_image_labels.pop(image_id, None)
-                st.session_state.assistant_upload_widget_version += 1
-                st.rerun()
-
-    if st.button("Clear current image selection", key="assistant_clear_images"):
-        _, referenced = clear_image_selection(selected, st.session_state.chat_history)
-        st.session_state.assistant_selected_image_ids = []
-        st.session_state.assistant_image_assets = {
-            image_id: image for image_id, image in assets.items() if image_id in referenced
-        }
-        st.session_state.assistant_upload_widget_version += 1
-        st.rerun()
-
-
-def _render_clear_all_images() -> None:
-    if not st.session_state.assistant_image_assets:
-        return
-    if st.button("Clear all uploaded images and image-linked chat content", key="assistant_clear_all_images"):
-        assets, selected, labels, history = clear_all_image_data(
-            st.session_state.assistant_image_assets,
-            st.session_state.assistant_selected_image_ids,
-            st.session_state.assistant_image_labels,
-            st.session_state.chat_history,
-        )
-        st.session_state.assistant_image_assets = assets
-        st.session_state.assistant_selected_image_ids = selected
-        st.session_state.assistant_image_labels = labels
-        st.session_state.chat_history = history
-        st.session_state.assistant_last_report = None
-        st.session_state.assistant_upload_widget_version += 1
-        st.rerun()
-
-
-def _render_reuse_images(max_images: int) -> None:
-    assets = st.session_state.assistant_image_assets
-    selected = st.session_state.assistant_selected_image_ids
-    if not assets:
-        return
-    referenced = {
-        image_id for message in st.session_state.chat_history for image_id in message.get("image_ids", [])
-    }
-    available = [image_id for image_id in assets if image_id in referenced and image_id not in selected]
-    if not available:
-        return
-    with st.expander("Reuse a previously uploaded image"):
-        st.caption("Previously uploaded images stay in this session's chat history. Select one again only when you want it resent.")
-        for image_id in available:
-            image = assets[image_id]
-            if st.button(f"Use {image['filename']} · {image['width']} × {image['height']} px", key=f"assistant_reuse_{image_id}"):
-                if len(selected) >= max_images:
-                    st.warning(f"Only {max_images} images can be selected for one request.")
-                else:
-                    st.session_state.assistant_selected_image_ids.append(image_id)
-                    st.rerun()
-
-
-def _engineering_context() -> dict[str, str]:
-    with st.expander("Circuit and layout context", expanded=False):
-        st.caption("Only values you enter are sent with an image request. Unknown process or device details remain unknown.")
-        topology = st.text_input("Circuit topology", key="assistant_context_topology", placeholder="e.g. folded-cascode OTA")
-        devices = st.text_input("Device names", key="assistant_context_devices", placeholder="e.g. input pair M1/M2")
-        objective = st.text_input("Design objective", key="assistant_context_objective", placeholder="e.g. improve input offset matching")
-        process = st.text_input("Process node (if known)", key="assistant_context_process")
-        matching = st.text_area("Critical matching requirements", key="assistant_context_matching", height=70)
-        concern = st.text_area("Specific concern or question", key="assistant_context_concern", height=70)
-    return {
-        "circuit_topology": topology,
-        "device_names": devices,
-        "design_objective": objective,
-        "process_node": process,
-        "critical_matching_requirements": matching,
-        "specific_concern": concern,
-    }
-
-
-def _provider_history() -> list[dict[str, str]]:
-    return [
-        {"role": message.get("role", "user"), "content": message.get("content", "")}
-        for message in st.session_state.chat_history[-8:]
-        if message.get("content")
-    ]
-
-
-def _provider_comparison_controls(
-    configs: dict[str, Any]
-) -> bool:
-    both_available = all(name in configs for name in ("gemini", "openai"))
-    compare_mode = st.checkbox(
-        "Compare Gemini and OpenAI on the same image request",
-        value=False,
-        disabled=not both_available,
-        key="assistant_compare_providers",
-        help="Both providers receive the same selected images, question, recent text context, and engineering context.",
-    )
-    if not both_available:
-        st.caption("Provider comparison is unavailable until both Gemini and OpenAI have a model and credential configured.")
-        return False
-    if not compare_mode:
-        return False
-
-    st.warning("Comparison sends the selected images and listed context to both providers. Each provider requires its own explicit consent.")
-    for provider_id in ("gemini", "openai"):
-        st.info(_privacy_text(provider_id))
-    return True
 
 
 def _render_request_consents(
@@ -570,13 +265,13 @@ def _render_request_consents(
     labels: dict[str, str],
     engineering_context: dict[str, str],
 ) -> dict[str, bool]:
-    """Show unchecked consent controls tied to this exact request content."""
     targets = ["gemini", "openai"] if compare_mode else ([selected_provider] if selected_provider else [])
     consented: dict[str, bool] = {}
     if not targets:
         st.caption("Choose a configured provider before sending an image request.")
         return consented
     st.markdown("**Confirm this specific image request**")
+    nonce = getattr(st.session_state, "assistant_request_nonce", 0)
     for provider_id in targets:
         if provider_id not in configs:
             consented[provider_id] = False
@@ -584,261 +279,349 @@ def _render_request_consents(
         config = configs[provider_id]
         key = image_request_consent_key(
             provider_id, config.model, question, image_ids, labels, engineering_context,
-            compare_mode, st.session_state.assistant_request_nonce,
+            compare_mode, nonce,
         )
         consented[provider_id] = st.checkbox(
-            f"I consent to send this question, selected image(s), and listed context to {PROVIDER_LABELS[provider_id]} ({config.model}).",
+            f"I consent to send this question, selected image(s), and listed context to {PROVIDER_LABELS.get(provider_id, provider_id)} ({config.model}).",
             value=False,
             key=key,
         )
     return consented
 
 
-def _render_exports() -> None:
-    report = st.session_state.get("assistant_last_report")
-    if not report:
-        return
-    with st.expander("Export latest image analysis", expanded=False):
-        st.caption("Exports metadata and findings only; uploaded image bytes are not embedded.")
-        json_data = json.dumps(report, indent=2, ensure_ascii=False, default=str)
-        markdown_data = analysis_report_markdown(report)
-        col_json, col_markdown = st.columns(2)
-        col_json.download_button(
-            "Download JSON report", data=json_data, file_name="siliconpilot_image_analysis.json",
-            mime="application/json", key="assistant_export_json", width="stretch",
-        )
-        col_markdown.download_button(
-            "Download Markdown report", data=markdown_data, file_name="siliconpilot_image_analysis.md",
-            mime="text/markdown", key="assistant_export_markdown", width="stretch",
-        )
+def run_vision_analysis_for_providers(
+    configs: dict[str, Any],
+    provider_ids: list[str],
+    images: list[ImageInput],
+    question: str,
+    *,
+    consented_provider_ids: set[str],
+    conversation_context: list[dict[str, str]],
+    comparison_requested: bool,
+    engineering_context: dict[str, str],
+    service_factory=None,
+) -> dict[str, dict[str, Any]]:
+    factory = service_factory or VisionAnalysisService
+    results: dict[str, dict[str, Any]] = {}
+    for provider_id in provider_ids:
+        config = configs.get(provider_id)
+        if provider_id not in consented_provider_ids:
+            results[provider_id] = {
+                "model": getattr(config, "model", None), "status": "not_sent",
+                "analysis": None, "error": "No request sent because provider-specific consent was not granted.",
+            }
+            continue
+        if config is None:
+            results[provider_id] = {
+                "model": None, "status": "unavailable", "analysis": None,
+                "error": "No request sent because this provider is not configured.",
+            }
+            continue
+        provider_service = factory(config)
+        try:
+            analysis = provider_service.analyze(
+                images, question, conversation_context=conversation_context,
+                comparison_requested=comparison_requested,
+                engineering_context=engineering_context,
+            )
+            results[provider_id] = {
+                "model": provider_service.model_name, "status": "completed",
+                "analysis": analysis, "error": None,
+            }
+        except VisionAnalysisError as exc:
+            results[provider_id] = {
+                "model": getattr(config, "model", None), "status": "failed",
+                "analysis": None, "error": str(exc),
+            }
+    return results
 
+
+# ---------------------------------------------------------------------------
+# State Initialization
+# ---------------------------------------------------------------------------
+
+def _initialise_state() -> None:
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = [
+            {
+                "role": "assistant",
+                "content": (
+                    "👋 **Hello! I am SiliconPilot AI**, your Analog IC Layout Engineering Assistant.\n\n"
+                    "Ask me about **transistor sizing, matching, common-centroid floorplans, differential pairs, current mirrors, DRC/LVS debugging, or SPICE simulation**.\n\n"
+                    "💡 *Tip: Click **➕ Attach** beside the composer to attach layout screenshots for instant visual analysis!*"
+                ),
+                "images": [],
+                "model": "SiliconPilot AI",
+                "timestamp": datetime.now().strftime("%H:%M"),
+                "status": "success",
+            }
+        ]
+    if "staged_attachments" not in st.session_state:
+        st.session_state.staged_attachments = []
+    if "assistant_consent" not in st.session_state:
+        st.session_state.assistant_consent = True
+    if "uploader_key_nonce" not in st.session_state:
+        st.session_state.uploader_key_nonce = 0
+    if "last_failed_turn" not in st.session_state:
+        st.session_state.last_failed_turn = None
+    if "prefilled_prompt" not in st.session_state:
+        st.session_state.prefilled_prompt = ""
+
+
+# ---------------------------------------------------------------------------
+# Main Page Renderer
+# ---------------------------------------------------------------------------
 
 def render() -> None:
-    render_header(
-        "AI engineering assistant",
-        "Analog IC design discussion, screenshot analysis, and read-only engineering artifact inspection",
-    )
     _initialise_state()
     chatbot = SiliconPilotChatbot()
-    secrets = _vision_secrets()
-    configured_configs = resolve_configured_provider_configs(secrets=secrets)
-    provider_image_limits = [config.max_images for config in configured_configs.values()]
-    max_images = min([4, *provider_image_limits])
-    st.markdown(
-        "Ask a question, or drop one or more layout screenshots below. Visual findings are AI-generated hypotheses; "
-        "they do not establish connectivity, DRC/LVS, extracted parasitics, or electrical performance."
-    )
 
-    st.markdown("#### Attach layout screenshots")
-    st.caption(
-        f"PNG, JPG, or JPEG · up to {MAX_UPLOAD_MB} MB each · up to {max_images} images per request · "
-        "session-only storage. Images are sent only by the dedicated Analyze selected images action after per-request consent. Text chat never attaches them."
-    )
-    uploader_key = f"assistant_layout_upload_{st.session_state.assistant_upload_widget_version}"
-    uploads = st.file_uploader(
-        "Upload layout images", type=["png", "jpg", "jpeg"], accept_multiple_files=True,
-        max_upload_size=MAX_UPLOAD_MB, key=uploader_key,
-        help="Drag files here or browse. Add two or more labelled images when asking for a comparison.",
-    )
-    assets = st.session_state.assistant_image_assets
-    selected = st.session_state.assistant_selected_image_ids
-    seen_errors: set[str] = set()
-    for upload in uploads or []:
-        try:
-            image = validate_uploaded_image(upload)
-            if image.image_id not in selected:
-                if len(selected) >= max_images:
-                    st.warning(f"Only {max_images} images can be selected for one request; {image.filename} was not added.")
-                    continue
-                if image.image_id not in assets:
-                    assets[image.image_id] = _asset_record(image)
-                selected.append(image.image_id)
-            elif image.image_id not in assets:
-                assets[image.image_id] = _asset_record(image)
-        except ImageValidationError as exc:
-            message = f"{getattr(upload, 'name', 'Uploaded file')}: {exc}"
-            if message not in seen_errors:
-                st.error(message)
-                seen_errors.add(message)
+    # 1. Header & Live Status Bar
+    col_head, col_status = st.columns([7, 3])
+    with col_head:
+        render_header(
+            "AI Engineering Assistant",
+            "Conversational Analog IC Design Automation & Multimodal Layout Verification",
+        )
+    with col_status:
+        if chatbot.is_gemini_active:
+            st.success(f"🟢 **Gemini Active** (`{chatbot.gemini_provider.model_name}`)")
+        else:
+            st.info("🟠 **Offline Knowledge Base Mode**")
 
-    st.caption(f"{len(st.session_state.assistant_selected_image_ids)} image(s) selected for the next request.")
-    _render_selected_images(max_images)
-    _render_clear_all_images()
+    # 2. Control Bar (Consent, Quick Clear, Active Diagnostics Link)
+    col_c1, col_c2, col_c3 = st.columns([5, 3, 2])
+    with col_c1:
+        st.session_state.assistant_consent = st.checkbox(
+            "🔒 Consent to transmit layout screenshots to Google Gemini API",
+            value=st.session_state.assistant_consent,
+            help="Required to send images to Google's multimodal API for optical analysis.",
+        )
+    with col_c2:
+        st.caption("Visual findings are engineering hypotheses; not signoff DRC/LVS.")
+    with col_c3:
+        if st.button("🗑️ New Chat", key="btn_clear_chat", help="Start a clean conversation session"):
+            st.session_state.chat_history = []
+            st.session_state.staged_attachments = []
+            st.session_state.last_failed_turn = None
+            _initialise_state()
+            st.rerun()
 
-    selected_ids = [
-        image_id for image_id in st.session_state.assistant_selected_image_ids
-        if image_id in st.session_state.assistant_image_assets
-    ]
-    image_labels = {
-        image_id: st.session_state.assistant_image_labels.get(image_id, "")
-        for image_id in selected_ids
-    }
-    image_question = st.text_input(
-        "Question to send with the selected image(s)",
-        key=f"assistant_image_question_{st.session_state.assistant_image_question_version}",
-        placeholder="e.g. Describe the visible matching pattern and list checks for review",
-    )
-
-    with st.expander("Provider and privacy settings", expanded=True):
-        service, selected_provider = _provider_controls(secrets)
-        configs = resolve_configured_provider_configs(secrets=secrets)
-        compare_mode = _provider_comparison_controls(configs)
-
-    engineering_context = _engineering_context()
-    request_consents = _render_request_consents(
-        configs, selected_provider, compare_mode, image_question,
-        selected_ids, image_labels, engineering_context,
-    )
-    analyze_images_clicked = st.button(
-        "Analyze selected images",
-        type="primary",
-        disabled=not selected_ids or service is None,
-        key="assistant_analyze_selected_images",
-        help="Only this button can send the selected images. Consent is tied to the question, images, labels and entered context.",
-    )
-    if not selected_ids:
-        st.caption("Upload or select an image to enable an explicit image-analysis request.")
-
-    with st.expander("Inspect an EDA report, SPICE netlist, or native layout file", expanded=False):
+    # 3. Read-Only EDA Artifact Inspector (Collapsible Drawer)
+    with st.expander("📁 Inspect EDA Artifacts (DRC/LVS Logs, SPICE Netlists, GDSII/OASIS)", expanded=False):
         st.caption("Read-only inspection only. Imported netlists are never executed automatically; uploaded files are not stored permanently.")
-        artifact = st.file_uploader(
-            "Engineering artifact", type=["txt", "log", "out", "rpt", "drc", "lvs", "spef", "csv", "json", "html", "htm", "cir", "sp", "spice", "net", "gds", "gdsii", "oas", "oasis", "def", "lef"],
-            accept_multiple_files=False, max_upload_size=25, key="assistant_engineering_artifact",
-        )
-        artifact_kind = st.selectbox(
-            "Artifact type", ["EDA report", "SPICE netlist", "Native layout metadata"],
-            key="assistant_artifact_kind",
-        )
-        artifact_bytes = artifact.getvalue() if artifact is not None else None
-        current_artifact_key = (
-            artifact_report_key(artifact.name, artifact_bytes, artifact_kind)
-            if artifact is not None and artifact_bytes is not None else None
-        )
-        if st.session_state.get("assistant_artifact_report_key") != current_artifact_key:
-            st.session_state.assistant_artifact_report = None
-            st.session_state.assistant_artifact_report_key = None
-        if st.button("Inspect artifact", key="assistant_inspect_artifact", disabled=artifact is None):
-            from src.eda.inspection import ArtifactInspectionError, inspect_artifact
-            try:
-                st.session_state.assistant_artifact_report = inspect_artifact(
-                    artifact.name, artifact_bytes, artifact_kind
-                )
-                st.session_state.assistant_artifact_report_key = current_artifact_key
-            except ArtifactInspectionError as exc:
-                st.session_state.assistant_artifact_report = {
-                    "status": "unsupported", "source_filename": artifact.name,
-                    "message": str(exc),
-                }
-                st.session_state.assistant_artifact_report_key = current_artifact_key
-            except Exception as exc:
-                st.session_state.assistant_artifact_report = {
-                    "status": "unsupported", "source_filename": artifact.name,
-                    "message": f"Artifact inspection failed safely: {type(exc).__name__}.",
-                }
-                st.session_state.assistant_artifact_report_key = current_artifact_key
-        artifact_report = st.session_state.get("assistant_artifact_report")
-        if artifact_report:
-            if artifact_report.get("status") == "unsupported":
-                st.warning(artifact_report.get("message", "Unsupported artifact."))
-            else:
-                st.json(artifact_report)
-                st.download_button(
-                    "Download artifact inspection JSON",
-                    data=json.dumps(artifact_report, indent=2, ensure_ascii=False, default=str),
-                    file_name="siliconpilot_artifact_inspection.json", mime="application/json",
-                    key="assistant_artifact_export",
-                )
-
-    with st.expander("Quick topics"):
-        quick_columns = st.columns(2)
-        quick_query = None
-        for index, (label, query_text) in enumerate(QUICK_PROMPTS.items()):
-            if quick_columns[index % 2].button(label, key=f"assistant_quick_{index}"):
-                quick_query = query_text
-
-    _render_history()
-    user_query = st.chat_input("Ask an analog layout, circuit, or model question?")
-    query = quick_query or user_query
-    if analyze_images_clicked:
-        image_query = image_question.strip()
-        if not image_query:
-            st.warning("Enter a question for the selected image(s). No provider request was sent.")
-        elif service is None or selected_provider is None:
-            st.warning("No provider request was sent. Select a configured provider first.")
-        else:
-            comparison_requested = is_comparison_request(image_query)
-            images = [
-                _image_from_record(st.session_state.assistant_image_assets[image_id], image_labels[image_id])
-                for image_id in selected_ids
-            ]
-            if comparison_requested and len(images) < 2:
-                st.warning("Select at least two images and give them clear labels before requesting a visual comparison. No provider request was sent.")
-            else:
-                target_provider_ids = ["gemini", "openai"] if compare_mode else [selected_provider]
-                consented = {
-                    provider_id for provider_id in target_provider_ids
-                    if request_consents.get(provider_id, False)
-                }
-                if not image_request_is_authorized(
-                    True, selected_ids, target_provider_ids, consented
-                ):
-                    st.warning("No provider request was sent. Consent is required separately for every selected provider and this exact question, image set, and context.")
-                    st.session_state.assistant_request_nonce += 1
-                    st.rerun()
-                else:
-                    st.session_state.chat_history.append({
-                        "role": "user", "content": image_query,
-                        "image_ids": selected_ids.copy(), "image_labels": image_labels,
-                    })
-                    results = run_vision_analysis_for_providers(
-                        configs, target_provider_ids, images, image_query,
-                        consented_provider_ids=consented,
-                        conversation_context=_provider_history()[:-1],
-                        comparison_requested=comparison_requested,
-                        engineering_context=engineering_context,
+        col_art_upload, col_art_kind = st.columns([7, 3])
+        with col_art_upload:
+            artifact = st.file_uploader(
+                "Upload engineering file",
+                type=["txt", "log", "out", "rpt", "drc", "lvs", "spef", "csv", "json", "html", "htm", "cir", "sp", "spice", "net", "gds", "gdsii", "oas", "oasis", "def", "lef"],
+                accept_multiple_files=False, max_upload_size=25, key="assistant_engineering_artifact",
+            )
+        with col_art_kind:
+            artifact_kind = st.selectbox(
+                "Artifact type", ["EDA report", "SPICE netlist", "Native layout metadata"],
+                key="assistant_artifact_kind",
+            )
+        if artifact is not None:
+            artifact_bytes = artifact.getvalue()
+            current_key = artifact_report_key(artifact.name, artifact_bytes, artifact_kind)
+            if st.button("Inspect Artifact", key="assistant_inspect_artifact", type="secondary"):
+                try:
+                    rep = inspect_artifact(artifact.name, artifact_bytes, artifact_kind)
+                    st.session_state.assistant_artifact_report = rep
+                    st.session_state.assistant_artifact_report_key = current_key
+                except Exception as exc:
+                    st.session_state.assistant_artifact_report = {
+                        "status": "unsupported", "source_filename": artifact.name, "message": str(exc),
+                    }
+            rep = st.session_state.get("assistant_artifact_report")
+            if rep:
+                st.json(rep)
+                col_dl, col_ask = st.columns([1, 1])
+                with col_dl:
+                    st.download_button(
+                        "Download Inspection JSON",
+                        data=json.dumps(rep, indent=2, ensure_ascii=False, default=str),
+                        file_name="siliconpilot_artifact_inspection.json",
+                        mime="application/json",
                     )
-                    completed = sum(result.get("analysis") is not None for result in results.values())
-                    comparison = compare_provider_findings(results) if compare_mode and completed == 2 else None
-                    response = provider_findings_context(results)
-                    if comparison:
-                        response += (
-                            "\nExact wording overlap between providers is descriptive only; "
-                            "it is not an engineering consensus or correctness score."
-                        )
-                    st.session_state.assistant_last_report = build_analysis_report(
-                        image_query, images, results, comparison=comparison
-                    )
-                    st.session_state.chat_history.append({
-                        "role": "assistant", "content": response, "image_ids": [],
-                        "source_image_ids": selected_ids.copy(), "provider_results": results,
-                        "comparison_requested": comparison_requested,
-                    })
-                    st.session_state.assistant_request_nonce += 1
-                    st.session_state.assistant_image_question_version += 1
+                with col_ask:
+                    if st.button("💬 Discuss this report with Assistant", key="btn_discuss_report"):
+                        summary_snippet = f"I inspected EDA artifact '{rep.get('source_filename')}'. It has {rep.get('error_count', 0)} errors and {rep.get('warning_count', 0)} warnings. Rule violations: {rep.get('rule_names', [])}. Can you explain these errors and suggest fixes?"
+                        st.session_state.chat_history.append({"role": "user", "content": summary_snippet, "images": []})
+                        res = chatbot.respond(summary_snippet, history=st.session_state.chat_history[:-1])
+                        st.session_state.chat_history.append({
+                            "role": "assistant", "content": res.text if hasattr(res, "text") else str(res),
+                            "images": [], "model": getattr(res, "model", "SiliconPilot AI"),
+                            "status": getattr(res, "status", "success"),
+                            "timestamp": datetime.now().strftime("%H:%M"),
+                        })
+                        st.rerun()
+
+    st.markdown("---")
+
+    # 4. Conversation History Transcript
+    for idx, msg in enumerate(st.session_state.chat_history):
+        with st.chat_message(msg["role"]):
+            # If user message had images, render them
+            if msg.get("images"):
+                img_cols = st.columns(min(len(msg["images"]), 4))
+                for c_idx, img_rec in enumerate(msg["images"]):
+                    with img_cols[c_idx]:
+                        if "data" in img_rec:
+                            st.image(img_rec["data"], caption=f"{img_rec.get('filename')} ({img_rec.get('width')}x{img_rec.get('height')})", use_container_width=True)
+            # Message content
+            if msg.get("status") == "error":
+                st.error(msg["content"])
+                if st.button("🔄 Retry", key=f"retry_msg_{idx}"):
+                    last_user_turn = None
+                    for prev_turn in reversed(st.session_state.chat_history[:idx]):
+                        if prev_turn["role"] == "user":
+                            last_user_turn = prev_turn
+                            break
+                    if last_user_turn:
+                        with st.spinner("Retrying request with Gemini..."):
+                            att_objs = [
+                                ImageInput(
+                                    image_id=im.get("image_id", "id"),
+                                    filename=im.get("filename", "img"),
+                                    mime_type=im.get("mime_type", "image/png"),
+                                    data=im.get("data", b""),
+                                    width=im.get("width", 100),
+                                    height=im.get("height", 100),
+                                )
+                                for im in last_user_turn.get("images", [])
+                            ]
+                            new_res = chatbot.respond(
+                                last_user_turn["content"],
+                                history=st.session_state.chat_history[:idx - 1],
+                                attachments=att_objs,
+                            )
+                            st.session_state.chat_history[idx] = {
+                                "role": "assistant",
+                                "content": new_res.text if hasattr(new_res, "text") else str(new_res),
+                                "images": [],
+                                "model": getattr(new_res, "model", "SiliconPilot AI"),
+                                "latency_ms": getattr(new_res, "latency_ms", 0.0),
+                                "timestamp": datetime.now().strftime("%H:%M"),
+                                "status": getattr(new_res, "status", "success"),
+                                "error": getattr(new_res, "error", None),
+                            }
+                            st.rerun()
+            else:
+                st.markdown(msg["content"])
+                if msg["role"] == "assistant" and msg.get("model"):
+                    st.caption(f"🤖 `{msg.get('model')}` · {msg.get('timestamp', '')}")
+
+    # 5. Staged Attachments Preview Strip
+    if st.session_state.staged_attachments:
+        st.markdown("##### 📎 Staged Layout Attachments (Ready to send):")
+        att_cols = st.columns(len(st.session_state.staged_attachments) + 2)
+        for att_idx, att in enumerate(st.session_state.staged_attachments):
+            with att_cols[att_idx]:
+                st.image(att["data"], caption=f"{att['filename']} ({att['width']}×{att['height']})", width=120)
+                if st.button("✖ Remove", key=f"btn_rem_att_{att_idx}"):
+                    st.session_state.staged_attachments.pop(att_idx)
+                    st.rerun()
+        with att_cols[-2]:
+            if st.button("🗑️ Clear All", key="btn_clear_staged", help="Discard all staged attachments"):
+                st.session_state.staged_attachments.clear()
+                st.session_state.uploader_key_nonce += 1
+                st.rerun()
+        with att_cols[-1]:
+            if st.button("🚀 Send Images", key="btn_send_staged", type="primary", help="Send staged images with default analog review prompt"):
+                default_prompt = "Please analyze this analog IC layout screenshot in detail, focusing on device matching, interdigitation, dummy devices, guard rings, routing symmetry, and potential layout-dependent issues."
+                _submit_chat_turn(default_prompt, chatbot)
+
+    # 6. Persistent Composer with Adjacent ➕ Attachment Button
+    col_attach, col_input = st.columns([1.2, 9.8])
+    with col_attach:
+        with st.popover("➕ Attach", help="Attach layout screenshots (PNG, JPG, JPEG, WEBP)"):
+            st.markdown("**Attach Layout Screenshots**")
+            st.caption("PNG, JPG, JPEG, WEBP up to 10 MB. Max 4 images per turn.")
+            uploads = st.file_uploader(
+                "Upload images",
+                type=["png", "jpg", "jpeg", "webp"],
+                accept_multiple_files=True,
+                key=f"composer_uploader_{st.session_state.uploader_nonce if hasattr(st.session_state, 'uploader_nonce') else 0}",
+                label_visibility="collapsed",
+            )
+            if uploads:
+                for up in uploads:
+                    try:
+                        valid_img = validate_uploaded_image(up)
+                        # Check duplicate
+                        if not any(a["filename"] == valid_img.filename and len(a["data"]) == len(valid_img.data) for a in st.session_state.staged_attachments):
+                            if len(st.session_state.staged_attachments) >= 4:
+                                st.warning("Maximum of 4 images per message.")
+                                break
+                            st.session_state.staged_attachments.append({
+                                "image_id": valid_img.image_id,
+                                "filename": valid_img.filename,
+                                "mime_type": valid_img.mime_type,
+                                "data": valid_img.data,
+                                "width": valid_img.width,
+                                "height": valid_img.height,
+                            })
+                    except ImageValidationError as err:
+                        st.error(f"{up.name}: {err}")
+                if uploads:
                     st.rerun()
 
-    if query:
-        prior_history = list(st.session_state.chat_history)
-        if (
-            not quick_query and selected_ids
-            and VISUAL_ANALYSIS_INTENT.search(query)
-        ):
-            st.session_state.chat_history.append({"role": "user", "content": query, "image_ids": []})
-            st.session_state.chat_history.append({
-                "role": "assistant",
-                "content": "This text-chat turn did not include your selected screenshots. To request image analysis, enter the question in the image-analysis box above, review the privacy details, and click **Analyze selected images**.",
-                "image_ids": [],
-            })
-        else:
-            _append_text_turn(query, chatbot, prior_history)
-        st.rerun()
-
-    _render_exports()
+    with col_input:
+        user_text = st.chat_input("Ask an analog IC question or describe your attached layout...")
+        if user_text:
+            _submit_chat_turn(user_text, chatbot)
 
 
-def _append_text_turn(
-    query: str, chatbot: SiliconPilotChatbot, history: list[dict[str, Any]] | None = None
-) -> None:
-    st.session_state.chat_history.append({"role": "user", "content": query, "image_ids": []})
-    response = chatbot.respond(query, history=history or [])
-    st.session_state.chat_history.append({"role": "assistant", "content": response, "image_ids": []})
+def _submit_chat_turn(prompt: str, chatbot: SiliconPilotChatbot) -> None:
+    staged = list(st.session_state.staged_attachments)
+    st.session_state.staged_attachments.clear()
+
+    # Check consent if images are present
+    if staged and not st.session_state.assistant_consent:
+        st.warning("⚠️ Image analysis requires consent. Please check the consent box at the top before sending layout images.")
+        st.session_state.staged_attachments = staged
+        return
+
+    # Add user message to history
+    st.session_state.chat_history.append({
+        "role": "user",
+        "content": prompt,
+        "images": staged,
+        "timestamp": datetime.now().strftime("%H:%M"),
+    })
+
+    # Prepare ImageInput objects
+    att_inputs = [
+        ImageInput(
+            image_id=item["image_id"],
+            filename=item["filename"],
+            mime_type=item["mime_type"],
+            data=item["data"],
+            width=item["width"],
+            height=item["height"],
+        )
+        for item in staged
+    ]
+
+    # Generate assistant turn
+    with st.spinner("SiliconPilot AI is reasoning..."):
+        res = chatbot.respond(
+            prompt,
+            history=st.session_state.chat_history[:-1],
+            attachments=att_inputs,
+        )
+
+    # Store assistant message
+    st.session_state.chat_history.append({
+        "role": "assistant",
+        "content": res.text if hasattr(res, "text") else str(res),
+        "images": [],
+        "model": getattr(res, "model", "SiliconPilot AI"),
+        "latency_ms": getattr(res, "latency_ms", 0.0),
+        "timestamp": datetime.now().strftime("%H:%M"),
+        "status": getattr(res, "status", "success"),
+        "error": getattr(res, "error", None),
+    })
+    st.rerun()

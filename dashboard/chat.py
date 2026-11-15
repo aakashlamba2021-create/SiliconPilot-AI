@@ -2,27 +2,68 @@
 AI Engineering Assistant Engine — SiliconPilot AI
 Provides domain-specific technical explanations for Analog IC Layout,
 MOSFET design, DRC/LVS, parasitics, and inspects live trained models and optimization results.
-Modular architecture allowing seamless drop-in of external LLM APIs (Gemini, Claude, OpenAI).
+Powered by Google Gemini with offline local knowledge base fallback.
 """
 from __future__ import annotations
 
+from datetime import datetime
+import os
+from pathlib import Path
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from src.assistant.providers.gemini_provider import GeminiVisionProvider
+from src.assistant.vision import ImageInput, resolve_provider_config
 from src.models.model_registry import ModelRegistry
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
+class ChatTurnResult(str):
+    """
+    String subclass holding response text and metadata for unified chat turns.
+    Preserves backwards compatibility with legacy string-asserting unit tests.
+    """
+    text: str
+    model: str
+    source: str
+    status: str
+    latency_ms: float
+    timestamp: str
+    error: Optional[str]
+
+    def __new__(cls, text: str, **kwargs: Any) -> ChatTurnResult:
+        obj = super().__new__(cls, text)
+        obj.text = text
+        obj.model = kwargs.get("model", "local-knowledge-base")
+        obj.source = kwargs.get("source", "local")
+        obj.status = kwargs.get("status", "success")
+        obj.latency_ms = kwargs.get("latency_ms", 0.0)
+        obj.timestamp = kwargs.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        obj.error = kwargs.get("error", None)
+        return obj
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "model": self.model,
+            "source": self.source,
+            "status": self.status,
+            "latency_ms": self.latency_ms,
+            "timestamp": self.timestamp,
+            "error": self.error,
+        }
+
+
 # ---------------------------------------------------------------------------
-# Analog IC Engineering Knowledge Base
+# Analog IC Engineering Offline Knowledge Base
 # ---------------------------------------------------------------------------
 
 ANALOG_KNOWLEDGE_BASE: Dict[str, Dict[str, str]] = {
     "differential_pair": {
         "title": "Differential Pair Layout & Matching",
-        "keywords": ["differential", "pair", "diff pair", "mismatch", "offset", "common centroid"],
+        "keywords": ["differential", "pair", "diff pair", "mismatch", "offset", "common centroid", "matching"],
         "content": (
             "**Differential Pair Layout Guidelines:**\n"
             "- **Common-Centroid Placement:** Transistors M1 and M2 must be interdigitated (e.g., ABBA or ABBA-BAAB) "
@@ -103,7 +144,7 @@ def _format_model_registry(registry: ModelRegistry) -> str | None:
     models = registry.list_models()
     if not models:
         return None
-    lines = ["### SiliconPilot AI — Trained Model Registry Status and provenance"]
+    lines = ["### SiliconPilot AI — Trained Model Registry Status and Provenance\n"]
     for name, info in models.items():
         status = registry.get_model_status(name)
         trust = status.get("trust_label", "unapproved")
@@ -136,76 +177,148 @@ def _format_model_registry(registry: ModelRegistry) -> str | None:
 
 class SiliconPilotChatbot:
     """
-    Local domain-knowledge AI engineering assistant with model introspection capabilities.
+    Conversational AI Engineering Assistant powered by Google Gemini,
+    with local domain-knowledge fallback when offline.
     """
 
-    def __init__(self, registry: ModelRegistry | None = None) -> None:
+    def __init__(
+        self,
+        registry: ModelRegistry | None = None,
+        secrets: Mapping[str, Any] | None = None,
+    ) -> None:
         self.registry = registry or ModelRegistry()
+        self.secrets = secrets or self._load_secrets()
+        self.gemini_provider = self._init_gemini()
 
-    def respond(self, query: str, history: list[dict[str, Any]] | None = None) -> str:
+    def _load_secrets(self) -> dict[str, Any]:
+        """Safely loads secrets from .streamlit/secrets.toml if present."""
+        secrets_path = Path(".streamlit/secrets.toml")
+        if secrets_path.exists():
+            try:
+                import tomllib
+                with open(secrets_path, "rb") as f:
+                    return tomllib.load(f)
+            except Exception as exc:
+                logger.warning(f"Could not load secrets.toml: {exc}")
+        return {}
+
+    def _init_gemini(self) -> Optional[GeminiVisionProvider]:
+        """Initializes GeminiVisionProvider if credentials are present."""
+        try:
+            config = resolve_provider_config(secrets=self.secrets, provider="gemini")
+            if config.is_configured:
+                return GeminiVisionProvider(config)
+        except Exception as exc:
+            logger.info(f"Gemini provider not configured: {exc}")
+        return None
+
+    @property
+    def is_gemini_active(self) -> bool:
+        return self.gemini_provider is not None
+
+    def test_connection(self) -> dict[str, Any]:
+        """Performs a live connectivity test against Gemini."""
+        if not self.gemini_provider:
+            return {
+                "status": "unconfigured",
+                "model": "None",
+                "latency_ms": 0.0,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "error": "GEMINI_API_KEY is not configured.",
+                "message": "API key missing. Add GEMINI_API_KEY to .streamlit/secrets.toml.",
+            }
+        return self.gemini_provider.test_connection()
+
+    def respond(
+        self,
+        query: str,
+        history: list[dict[str, Any]] | None = None,
+        attachments: Sequence[ImageInput] = (),
+        *,
+        force_local: bool = False,
+    ) -> ChatTurnResult:
         """
-        Processes an engineer's question and returns a structured technical response.
+        Unified response method. Calls Gemini if configured, or falls back to local knowledge base.
         """
-        q = query.strip().lower()
+        q = (query or "").strip()
+        
+        # 1. If Gemini is available and not forced to local, invoke Gemini conversational API
+        if self.gemini_provider and not force_local:
+            result = self.gemini_provider.send_chat_turn(
+                history=history or [],
+                user_text=q,
+                attachments=attachments,
+            )
+            return ChatTurnResult(
+                result["text"],
+                model=result.get("model", self.gemini_provider.model_name),
+                source="gemini",
+                status=result.get("status", "success"),
+                latency_ms=result.get("latency_ms", 0.0),
+                timestamp=result.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                error=result.get("error"),
+            )
+
+        # 2. Local deterministic fallback (offline mode)
+        if not q and attachments:
+            text = (
+                "⚠️ Gemini API key is not configured to inspect this image. "
+                "Add your `GEMINI_API_KEY` to `.streamlit/secrets.toml` to enable optical layout inspection."
+            )
+            return ChatTurnResult(text, model="local-fallback", source="local", status="warning")
+
         if not q:
-            return "Type a question about analog layout, circuits, model provenance, or simulation."
+            return ChatTurnResult(
+                "Type a question about analog layout, circuits, model provenance, or simulation.",
+                model="local-knowledge-base", source="local", status="success",
+            )
 
-        normalized = re.sub(r"[^a-z0-9' ]+", " ", q).strip()
+        normalized = re.sub(r"[^a-z0-9' ]+", " ", q.lower()).strip()
         normalized = re.sub(r"\s+", " ", normalized)
+
+        # Friendly conversational intents (unit-test compatible)
         if re.fullmatch(r"(hi|hello|hey|hiya|good morning|good afternoon|good evening)( there)?", normalized):
-            return "Hey! Welcome to SiliconPilot AI. What are we working on today?"
+            return ChatTurnResult("Hey! Welcome to SiliconPilot AI. What are we working on today?", model="local-knowledge-base", source="local")
         if re.fullmatch(r"(how are you|how's it going|hows it going|how are things)( today)?", normalized):
-            return "Doing well, thanks! Ready to help with your analog layout work. What are you looking into?"
+            return ChatTurnResult("Doing well, thanks! Ready to help with your analog layout work. What are you looking into?", model="local-knowledge-base", source="local")
         if normalized in {"thanks", "thank you", "thx"}:
-            return "You're welcome. Let me know what you want to look at next."
+            return ChatTurnResult("You're welcome. Let me know what you want to look at next.", model="local-knowledge-base", source="local")
         if normalized in {"bye", "goodbye", "see you", "see you later"}:
-            return "See you later. I’ll be here when you want to continue the design discussion."
+            return ChatTurnResult("See you later. I’ll be here when you want to continue the design discussion.", model="local-knowledge-base", source="local")
         if any(phrase in normalized for phrase in ("what can you do", "what do you do", "your capabilities", "help me get started")):
-            return (
-                "I can explain analog layout concepts, inspect uploaded layout screenshots with a configured vision provider, "
+            return ChatTurnResult(
+                "I can explain analog layout concepts, inspect uploaded layout screenshots with Gemini, "
                 "compare labelled alternatives, review model provenance, inspect supported EDA reports and netlists, and run explicit ngspice analyses. "
-                "Visual suggestions are hypotheses; DRC/LVS, connectivity, extracted parasitics, and silicon performance require their own evidence."
+                "Visual suggestions are hypotheses; DRC/LVS, connectivity, extracted parasitics, and silicon performance require their own evidence.",
+                model="local-knowledge-base", source="local"
             )
         if normalized in {"who are you", "what is siliconpilot", "what is siliconpilot ai"}:
-            return (
+            return ChatTurnResult(
                 "SiliconPilot AI is a local analog IC engineering workbench for dataset exploration, exploratory model analysis, "
-                "layout screenshot discussion, read-only artifact inspection, and explicit ngspice simulation."
+                "layout screenshot discussion, read-only artifact inspection, and explicit ngspice simulation.",
+                model="local-knowledge-base", source="local"
             )
         if re.search(r"\b(analy[sz]e|inspect|review)\b.*\b(layout|screenshot|image)\b", normalized):
-            return "Upload a PNG or JPEG layout screenshot above, then ask a specific question. I can only make visual observations; screenshots do not establish DRC/LVS or electrical behavior."
+            return ChatTurnResult(
+                "Upload a PNG, JPG, or WEBP layout screenshot using the ➕ Attach button, then ask a specific question. "
+                "I can only make visual observations; screenshots do not establish DRC/LVS or electrical behavior.",
+                model="local-knowledge-base", source="local"
+            )
 
-        if any(w in q for w in ["model", "trained", "accuracy", "r2", "performance", "metric", "registry"]):
+        # Model Registry inquiry
+        if any(w in q.lower() for w in ["model", "trained", "accuracy", "r2", "performance", "metric", "registry"]):
             registry_response = _format_model_registry(self.registry)
             if registry_response:
-                return registry_response
+                return ChatTurnResult(registry_response, model="local-registry", source="local")
 
-        # 1. Check for Model Registry / Status inquiries
-        if any(w in q for w in ["model", "trained", "accuracy", "r2", "performance", "metric", "registry"]):
-            models = self.registry.list_models()
-            if models:
-                resp = ["### 🤖 SiliconPilot AI — Trained Model Registry Status:\n"]
-                for name, info in models.items():
-                    resp.append(f"- **Model:** `{name}`")
-                    resp.append(f"  - **Type/Dataset:** {info.get('dataset_name', 'N/A')} ({info.get('description', '')})")
-                    resp.append(f"  - **Saved Version:** `{info.get('version_tag', '')}`")
-                    m = info.get("metrics", {})
-                    if "overall" in m:
-                        overall = m["overall"]
-                        if "mean_R2" in overall or "R2" in overall:
-                            r2_val = overall.get("mean_R2", overall.get("R2", 0))
-                            resp.append(f"  - **Test R² Score:** `{r2_val:.4f}`")
-                    elif "Accuracy" in m:
-                        resp.append(f"  - **Test Accuracy:** `{m['Accuracy']*100:.2f}%` (F1: `{m.get('F1', 0):.4f}`)")
-                return "\n".join(resp)
-
+        # History-aware topic matching
         recent_user_text = " ".join(
             str(item.get("content", ""))
             for item in (history or [])[-8:]
             if item.get("role") == "user" and str(item.get("content", "")).strip()
         )
-        effective_query = f"{recent_user_text} {q}" if len(normalized.split()) <= 5 else q
+        effective_query = f"{recent_user_text} {q.lower()}" if len(normalized.split()) <= 5 else q.lower()
 
-        # 2. Match against Analog Knowledge Base
         best_match = None
         best_score = 0
         for topic_key, topic_data in ANALOG_KNOWLEDGE_BASE.items():
@@ -215,16 +328,11 @@ class SiliconPilotChatbot:
                 best_match = topic_data
 
         if best_match and best_score > 0:
-            return f"### 📘 {best_match['title']}\n\n{best_match['content']}\n\n*Source: SiliconPilot Engineering Knowledge Engine*"
+            content = f"### 📘 {best_match['title']}\n\n{best_match['content']}\n\n*Source: SiliconPilot Engineering Knowledge Engine*"
+            return ChatTurnResult(content, model="local-knowledge-base", source="local")
 
-        if history and any(item.get("image_ids") for item in history if item.get("role") == "user"):
-            return (
-                "I can see that this session includes an earlier image discussion, but no image was sent with this text-only turn. "
-                "Ask about a specific point already covered above, or reselect the image if you want a vision provider to inspect its pixels again. "
-                "I will not infer new visual details without a new image-analysis request."
-            )
-
-        return (
+        return ChatTurnResult(
             "I can help with analog layout, matching, routing, model provenance, imported EDA evidence, and ngspice workflows. "
-            "Tell me the circuit or design issue you are working on, and I?ll keep the answer focused."
+            "Tell me the circuit or design issue you are working on, and I'll keep the answer focused.",
+            model="local-knowledge-base", source="local"
         )

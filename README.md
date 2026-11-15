@@ -2,10 +2,11 @@
 
 [![Python Version](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-105%20passed%2C%200%20failed-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-113%20passed%2C%200%20failed-brightgreen.svg)](tests/)
 [![Architecture](https://img.shields.io/badge/EDA-ngspice%20C--API-orange.svg)](docs/PROJECT_ARCHITECTURE.md)
+[![Gemini](https://img.shields.io/badge/AI%20Copilot-Google%20Gemini-4285F4.svg)](dashboard/pages/ai_assistant.py)
 
-> **SiliconPilot AI** is an intelligent, local, computer-aided design (CAD) exploration cockpit and engineering assistant for Analog Integrated Circuit (IC) design. It combines fast parametric machine-learning surrogates, multiobjective Pareto sizing trade-off exploration, deterministic SPICE circuit simulation with worker process isolation, and a multimodal vision assistant for analog layout inspection.
+> **SiliconPilot AI** is an intelligent, local, computer-aided design (CAD) exploration cockpit and engineering assistant for Analog Integrated Circuit (IC) design. It combines fast parametric machine-learning surrogates, multiobjective Pareto sizing trade-off exploration, deterministic SPICE circuit simulation with worker process isolation, a unified conversational Gemini assistant for layout inspection, and comprehensive system health diagnostics.
 
 ---
 
@@ -37,10 +38,11 @@
 Analog IC layout remains one of the most knowledge-intensive, iterative, and manual phases in semiconductor engineering. Small placement variations, routing asymmetries, and parasitic resistances/capacitances (PEX) can degrade circuit performance, compromise phase margin, or cause severe common-mode offset errors.
 
 **SiliconPilot AI** provides a unified engineering workbench where designers can:
+* Consult a conversational, multimodal Gemini AI assistant with in-composer layout attachments and follow-up memory.
 * Rapidly explore transistor sizing trade-offs ($W, L, M, N_{fingers}$) using surrogate models.
 * Evaluate candidate Pareto frontiers across gain, bandwidth, phase margin, and area.
 * Execute automated, deterministic SPICE simulations (AC frequency and transient) via an isolated C-API runner.
-* Consult a multimodal AI assistant that reviews layout screenshots, explains DRC/LVS reports, and enforces a strict Evidence Hierarchy.
+* Monitor runtime health, hardware resources, active API probes, and model trust boundaries through System Health & Diagnostics.
 
 ---
 
@@ -57,15 +59,18 @@ Designers face two critical bottlenecks:
 * **Engineering Credibility:** Enforce transparent provenance labelling across all UI components (`[SIMULATED]`, `[SURROGATE]`, `[SYNTHETIC]`, `[OBSERVED]`).
 * **Deterministic Verification:** Integrate real SPICE simulation using an in-process, isolated C-API bridge (`ngspice.dll`) to validate circuit candidates under testbenches.
 * **Fail-Closed Model Policy:** Quarantine flawed models (e.g., classifiers that collapse to trivial majorities or regressors with negative $R^2$) to protect design integrity.
-* **Multimodal Layout Review:** Provide an image-aware AI assistant capable of analyzing layout floorplans and explaining DRC/LVS logs without claiming to replace signoff physical verification.
+* **Multimodal Layout Review:** Provide a unified ChatGPT-like AI assistant capable of analyzing layout floorplans and explaining DRC/LVS logs without claiming to replace signoff physical verification.
+* **Actionable System Telemetry:** Provide comprehensive health diagnostics with live API latency and ngspice simulation smoke tests.
 
 ---
 
 ## 4. Key Features
+* **Unified Conversational Copilot:** Real-time multi-turn chat powered by Google Gemini (`gemini-3.8-flash` / `gemini-3-flash-preview`), supporting in-composer attachments, thumbnail previews, and retry capabilities.
+* **Structured 6-Section Analog Review:** Enforces rigorous layout inspection (Layout Overview, Device Identification, Layout Strategy, Critical Vulnerabilities, Suggested Improvements, Verification Imperatives).
+* **System Health & Diagnostics:** 8 diagnostic sections covering Runtime, Host Hardware, AI Telemetry (active test button), SPICE Simulation (active smoke test), Datasets, Model Trust, EDA Tools, and Logs.
 * **Interactive Sizing & Surrogate Intelligence:** Real-time geometric and aspect ratio exploration for multi-finger transistors.
 * **Pareto Candidate Optimization Studio:** Multi-objective ranking of candidate designs across competing analog performance vectors.
 * **Worker-Isolated SPICE Engine:** Seamless AC frequency response, transient step response, and DC operating-point simulation for Miller Two-Stage, Folded Cascode, Telescopic, and 5T-OTA circuits.
-* **Multimodal Layout Review Tray:** Multi-image upload tray (`.png`, `.jpg`, `.jpeg`) with thumbnail generation, deletion chips, and side-by-side vision provider comparison (Gemini & OpenAI).
 * **EDA Artifact & Netlist Inspector:** Read-only ingestion of GDSII, OASIS, LEF, DEF, and SPICE netlists with cell count and layer hierarchy extraction.
 * **Declarative Trust Enforcer:** Strict JSON-based model policy preventing unverified models from steering sizing decisions.
 
@@ -77,14 +82,14 @@ SiliconPilot AI separates the presentation layer from algorithmic computation an
 ```mermaid
 graph LR
     subgraph UI ["Streamlit Multi-Page UI"]
-        P1["Overview"]
-        P2["Dataset Explorer"]
-        P3["Model Evaluation"]
+        P1["AI Assistant (Default)"]
+        P2["Overview"]
+        P3["Dataset Explorer"]
         P4["Sizing & Layout"]
         P5["Candidate Studio"]
-        P6["AI Assistant"]
-        P7["System Info"]
-        P8["SPICE Studio"]
+        P6["Model Evaluation & Trust"]
+        P7["SPICE Studio"]
+        P8["System Health & Diagnostics"]
     end
 
     subgraph Core ["Algorithmic Engine (src/)"]
@@ -98,6 +103,14 @@ graph LR
     subgraph Execution ["Execution Layer"]
         ngspice["ngspice.dll (C-API)"]
         APIs["Vision APIs (Gemini/OpenAI)"]
+        Disk["Local Files (.gds, .cir, .rpt)"]
+    end
+
+    UI --> Core
+    SPICE --> ngspice
+    Vision --> APIs
+    EDA --> Disk
+```
         Disk["Local Files (.gds, .cir, .rpt)"]
     end
 

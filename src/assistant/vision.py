@@ -15,8 +15,8 @@ from PIL import Image, UnidentifiedImageError
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_IMAGE_PIXELS = 40_000_000
-SUPPORTED_FORMATS = {"PNG": "image/png", "JPEG": "image/jpeg"}
-SUPPORTED_SUFFIXES = {".png", ".jpg", ".jpeg"}
+SUPPORTED_FORMATS = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}
+SUPPORTED_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 DEFAULT_MAX_IMAGES = 4
 DEFAULT_MAX_REQUEST_BYTES = 18 * 1024 * 1024
 DEFAULT_MAX_OUTPUT_TOKENS = 3000
@@ -317,7 +317,7 @@ def validate_uploaded_image(upload: Any, *, max_bytes: int = MAX_IMAGE_BYTES) ->
     """Read and validate one Streamlit UploadedFile without writing it to disk."""
     filename = Path(str(getattr(upload, "name", ""))).name
     if not filename or Path(filename).suffix.lower() not in SUPPORTED_SUFFIXES:
-        raise ImageValidationError("Choose a PNG, JPG, or JPEG image.")
+        raise ImageValidationError("Choose a PNG, JPG, or JPEG image (or WEBP).")
     try:
         data = upload.getvalue() if hasattr(upload, "getvalue") else upload.read()
     except Exception as exc:
@@ -334,7 +334,7 @@ def validate_uploaded_image(upload: Any, *, max_bytes: int = MAX_IMAGE_BYTES) ->
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
         raise ImageValidationError("The file is not a readable image or is corrupted.") from exc
     if image_format not in SUPPORTED_FORMATS:
-        raise ImageValidationError("Only PNG, JPG, and JPEG images are supported.")
+        raise ImageValidationError("Only PNG, JPG, or JPEG images are supported (WEBP also supported).")
     if width <= 0 or height <= 0 or width * height > MAX_IMAGE_PIXELS:
         raise ImageValidationError("Image dimensions are invalid or exceed the safe pixel limit.")
     actual_mime = SUPPORTED_FORMATS[image_format]
@@ -342,7 +342,11 @@ def validate_uploaded_image(upload: Any, *, max_bytes: int = MAX_IMAGE_BYTES) ->
     if declared_mime and declared_mime not in {actual_mime, "application/octet-stream"}:
         raise ImageValidationError("The uploaded file type does not match its image content.")
     suffix = Path(filename).suffix.lower()
-    if (image_format == "PNG" and suffix != ".png") or (image_format == "JPEG" and suffix not in {".jpg", ".jpeg"}):
+    if (
+        (image_format == "PNG" and suffix != ".png")
+        or (image_format == "JPEG" and suffix not in {".jpg", ".jpeg"})
+        or (image_format == "WEBP" and suffix != ".webp")
+    ):
         raise ImageValidationError("The filename extension does not match the image content.")
     image_id = hashlib.sha256(filename.encode("utf-8") + b"\0" + data).hexdigest()[:20]
     return ImageInput(image_id, filename, actual_mime, data, width, height)

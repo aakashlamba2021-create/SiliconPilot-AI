@@ -19,3 +19,9 @@ textColor = "#E2E8F0"
 borderColor = "#26364A"
 primaryColor = "#38BDF8"
 linkColor = "#7DD3FC"
+
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = true
